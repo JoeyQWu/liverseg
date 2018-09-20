@@ -1,4 +1,4 @@
-deep structured active contour model to do liver segmentation
+ideep structured active contour model to do liver segmentation
 
 network architecture:
 layers = 6,
@@ -8,5 +8,6 @@ input size : [512,512]
 output size : [256,256]
 
 Energy = Data term + Eint + Balloon term
-
+Eint contains the parameters : the alpha and the beta
+Balloon term contains the parameter : the kappa
 manually initialization 
