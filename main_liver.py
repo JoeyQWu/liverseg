@@ -20,8 +20,8 @@ import sys
 from skimage import io,color,filters,img_as_ubyte
 #model_path = 'models/liver1860_sh125/'
 #model_path = 'models/liver1860_noise1/'
-#model_path = 'models/liver1860_res1/' no random rotate
-model_path = 'models/liver1860_res2/' #epoch50 random rotate
+model_path = 'models/liver1860_res1/' #no random rotation and epoch25
+#model_path = 'models/liver1860_res2/' #epoch50 random rotation
 do_plot = False
 do_train = False
 #100 is because the train set has 100 buildings
@@ -155,20 +155,20 @@ def epoch(n,i,mode):
     thisGT = np.copy(GT[:, :, batch_ind[0]])
     if mode is 'train':
         batch += np.random.uniform(-0.001,0.001,(512,512,3,1))
-        ang = np.random.rand() * 360
-        for j in range(len(batch_ind)):
-            for b in range(batch.shape[2]):
-                batch[:, :, b, j] = imrotate(batch[:, :, b, j], ang)
+        #ang = np.random.rand() * 360
+        #for j in range(len(batch_ind)):
+        #    for b in range(batch.shape[2]):
+        #        batch[:, :, b, j] = imrotate(batch[:, :, b, j], ang)
                 #plt.ion()
                 #plt.figure()
                 #plt.imshow(batch[:, :, b, j])
                 #plt.pause(5)
-            batch_mask[:, :, 0, j] = imrotate(batch_mask[:, :, 0, j], ang, resample='bicubic')
-        R = [[np.cos(ang * np.pi / 180), np.sin(ang * np.pi / 180)],
-             [-np.sin(ang * np.pi / 180), np.cos(ang * np.pi / 180)]]
-        thisGT -= out_size / 2
-        thisGT = np.matmul(thisGT, R)
-        thisGT += out_size / 2
+        #    batch_mask[:, :, 0, j] = imrotate(batch_mask[:, :, 0, j], ang, resample='bicubic')
+        #R = [[np.cos(ang * np.pi / 180), np.sin(ang * np.pi / 180)],
+        #     [-np.sin(ang * np.pi / 180), np.cos(ang * np.pi / 180)]]
+        #thisGT -= out_size / 2
+        #thisGT = np.matmul(thisGT, R)
+        #thisGT += out_size / 2
     [mapE, mapA, mapB, mapK, l2] = sess.run([predE, predA, predB, predK, l2loss], feed_dict={x: batch})
     mapA = np.maximum(mapA, 0)
     mapB = np.maximum(mapB,0)
@@ -241,7 +241,7 @@ with tf.Session(config=tf_config) as sess:
         start_epoch = int(save_path.split('-')[-1].split('.')[0])+1
 
     if do_train:
-        end_epoch = 50
+        end_epoch = 25
 
     else:
         end_epoch = start_epoch + 1
