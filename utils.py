@@ -6,6 +6,7 @@ import numpy as np
 import tensorflow as tf
 
 
+
 def active_contour_step(Fu, Fv, du, dv, snake_u, snake_v, alpha, beta,kappa,
                     gamma,max_px_move, delta_s):
 
@@ -14,6 +15,7 @@ def active_contour_step(Fu, Fv, du, dv, snake_u, snake_v, alpha, beta,kappa,
     N = Fu.shape[1]
     u = tf.cast(tf.round(snake_u),tf.int32)
     v = tf.cast(tf.round(snake_v), tf.int32)
+
 
     # Explicit time stepping for image energy minimization:
 
@@ -46,7 +48,7 @@ def active_contour_step(Fu, Fv, du, dv, snake_u, snake_v, alpha, beta,kappa,
     B = bm1dm2 - 2*(bm1dm1+b0dm1) + (bm1d0+4*b0d0+b1d0) - 2*(b0d1+b1d1) + b1d2
 
     # Get kappa values between nodes
-    s = 40
+    s = 10
     range_float = tf.cast(tf.range(s),tf.float32)
     snake_u1 = tf.concat([snake_u[L-1:L],snake_u[0:L-1]],0)
     snake_v1 = tf.concat([snake_v[L-1:L],snake_v[0:L-1]],0)
@@ -154,7 +156,7 @@ def plot_snakes(snake,snake_hist,GT,mapE, mapA, mapB, mapK, grads_arrayE, grads_
 
     #plt.colorbar(im, ax=ax)
     #fig0.suptitle('Image, GT (red) and converged snake (black)', fontsize=20)
-
+    
     im0 = ax[1].imshow(mapE[:, :, 0, 0])
     plt.colorbar(im0, ax=ax[1],fraction=0.046, pad=0.04)
     ax[1].axis('off')
@@ -297,8 +299,244 @@ def batch_norm(x):
     beta = tf.Variable(tf.zeros(batch_mean.shape))
     return tf.nn.batch_normalization(x, batch_mean, batch_var, beta, scale, 1e-7)
 
+def CNN(im_size,out_size,L,batch_size=1,layers = 5, wd=0.001, numfilt=0):
 
-def CNN_B(im_size,out_size,L,batch_size=1,layers = 5, wd=0.001, numfilt=None, E_blur=2,stack_from=2):
+    #Input and output
+    x = tf.placeholder(tf.float32, shape=[im_size, im_size, 3, batch_size])
+    x_image = tf.reshape(x, [-1, im_size, im_size, 3])
+    y_ = tf.placeholder(tf.float32, shape=[L,2])
+
+    W_conv = []
+    b_conv = []
+    h_conv = []
+    h_pool = []
+    resized_out = []
+    W_conv.append(weight_variable([3, 3, 3, 32], wd=wd))
+    b_conv.append(bias_variable([32]))
+    h_conv.append(tf.nn.relu(conv2d(x_image, W_conv[-1],padding='VALID') + b_conv[-1]))
+    h_pool.append(batch_norm(max_pool_2x2(h_conv[-1])))
+    for layer in range(1,layers):
+        W_conv.append(weight_variable([3, 3, 32+(layer-1)*numfilt, 32+layer*numfilt],wd=wd))
+        b_conv.append(bias_variable([32+layer*numfilt]))
+        h_conv.append(tf.nn.relu(conv2d(h_pool[-1], W_conv[-1],padding='VALID') + b_conv[-1]))
+        h_pool.append(batch_norm(max_pool_2x2(h_conv[-1])))
+        if layer > layers - 3:
+            resized_out.append(tf.image.resize_images(h_conv[-1], [out_size, out_size]))
+
+    h_concat = tf.concat(resized_out,3)
+
+    # MLP for dimension reduction
+    W_convd = weight_variable([1, 1, int(h_concat.shape[3]), 32+2*numfilt], wd=wd)
+    b_convd = bias_variable([32+2*numfilt])
+    h_convd = batch_norm(tf.nn.relu(conv2d(h_concat, W_convd) + b_convd))
+
+    #Final conv layer
+    W_convf = weight_variable([3, 3, 32+2*numfilt, 32],wd=wd)
+    b_convf = bias_variable([32])
+    h_convf = batch_norm(tf.nn.relu(conv2d(h_convd, W_convf) + b_convf))
+
+    #Predict energy
+    W_fcE = weight_variable([1, 1, 32, 1],wd=wd)
+    b_fcE = bias_variable([1])
+    h_fcE = conv2d(h_convf, W_fcE) + b_fcE
+    G_filt = gaussian_filter((15,15), 2)
+    predE = tf.reshape(conv2d(h_fcE,G_filt), [out_size, out_size, 1, -1])
+
+    # Predict alpha
+    W_fcA = weight_variable([1, 1, 32, 1],wd=wd)
+    b_fcA = bias_variable([1])
+    h_fcA = conv2d(h_convf, W_fcA) + b_fcA
+    h_fcA = tf.reduce_mean(h_fcA) + h_fcA * 0
+    # predA = tf.nn.softplus(tf.reshape(h_fcA,[im_size,im_size,1,-1]))
+    predA = tf.reshape(h_fcA, [out_size, out_size, 1, -1])
+    # Predict beta
+    W_fcB = weight_variable([1, 1, 32, 1],wd=wd)
+    b_fcB = bias_variable([1])
+    h_fcB = conv2d(h_convf, W_fcB) + b_fcB
+    #h_fcB = tf.log(1+tf.exp(h_fcB))
+    predB = tf.reshape(h_fcB, [out_size, out_size, 1, -1])
+    # Predict kappa
+    W_fcK = weight_variable([1, 1, 32, 1],wd=wd)
+    b_fcK = bias_variable([1])
+    h_fcK = conv2d(h_convf, W_fcK) + b_fcK
+    #h_fcK = tf.log(1+tf.exp(h_fcK))
+    predK = tf.reshape(h_fcK, [out_size, out_size, 1, -1])
+
+    #Inject the gradients
+    grad_predE = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predA = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predB = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predK = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    l2loss = tf.add_n(tf.get_collection('losses'), name='l2_loss')
+    grad_l2loss = tf.placeholder(tf.float32, shape=[])
+    tvars = tf.trainable_variables()
+    grads = tf.gradients([predE,predA,predB,predK,l2loss], tvars, grad_ys = [grad_predE,grad_predA,grad_predB,grad_predK,grad_l2loss])
+
+    return tvars,grads,predE, predA, predB, predK, l2loss, grad_predE, grad_predA, grad_predB, grad_predK, grad_l2loss, x,y_
+
+def CNN_B(im_size,out_size,L,batch_size=1,layers = 7, wd=0.001, numfilt=None, E_blur=2,stack_from=2):
+
+    if numfilt is None:
+        numfilt = np.ones(layers,dtype=np.int32)*32
+    #Input and output
+    x = tf.placeholder(tf.float32, shape=[im_size, im_size, 3, batch_size])
+    x_image = tf.reshape(x, [-1, im_size, im_size, 3])
+    y_ = tf.placeholder(tf.float32, shape=[L,2])
+
+    W_conv = []
+    b_conv = []
+    h_conv = []
+    h_pool = []
+    resized_out = []
+    W_conv.append(weight_variable([7, 7, 3, numfilt[0]], wd=wd))
+    b_conv.append(bias_variable([numfilt[0]]))
+    h_conv.append(tf.nn.relu(conv2d(x_image, W_conv[-1],padding='SAME') + b_conv[-1]))
+    h_pool.append(max_pool_2x2(batch_norm(h_conv[-1])))
+
+    for layer in range(1,layers):
+        if layer == 1:
+            W_conv.append(weight_variable([5, 5, numfilt[layer-1], numfilt[layer]],wd=wd))
+        else:
+            W_conv.append(weight_variable([3, 3, numfilt[layer-1], numfilt[layer]], wd=wd))
+        b_conv.append(bias_variable([numfilt[layer]]))
+        h_conv.append(batch_norm(conv2d(h_pool[-1], W_conv[-1],padding='SAME') + b_conv[-1]))
+        h_pool.append(max_pool_2x2(tf.nn.relu(h_conv[-1])))
+        if layer >= stack_from:
+            resized_out.append(tf.image.resize_images(h_conv[-1], [out_size, out_size]))
+
+    h_concat = tf.concat(resized_out,3)
+
+    # MLP for dimension reduction
+    W_convd = weight_variable([1, 1, int(h_concat.shape[3]), 256], wd=wd)
+    b_convd = bias_variable([256])
+    h_convd = tf.nn.relu(batch_norm(conv2d(h_concat, W_convd) + b_convd))
+
+    # MLP for dimension reduction
+    W_convf = weight_variable([1, 1, 256, 64],wd=wd)
+    b_convf = bias_variable([64])
+    h_convf = tf.nn.relu(batch_norm(conv2d(h_convd, W_convf) + b_convf))
+
+    #Predict energy
+    W_fcE = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcE = bias_variable([1])
+    h_fcE = conv2d(h_convf, W_fcE) + b_fcE
+    G_filt = gaussian_filter((3,3), E_blur)
+    predE = tf.reshape(conv2d(h_fcE,G_filt), [out_size, out_size, 1, -1])
+
+    # Predict alpha
+    W_fcA = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcA = bias_variable([1])
+    h_fcA = conv2d(h_convf, W_fcA) + b_fcA
+    h_fcA = tf.reduce_mean(h_fcA) + h_fcA * 0
+    # predA = tf.nn.softplus(tf.reshape(h_fcA,[im_size,im_size,1,-1]))
+    predA = tf.reshape(h_fcA, [out_size, out_size, 1, -1])
+    # Predict beta
+    W_fcB = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcB = bias_variable([1])
+    h_fcB = conv2d(h_convf, W_fcB) + b_fcB
+    #h_fcB = tf.log(1+tf.exp(h_fcB))
+    predB = tf.reshape(h_fcB, [out_size, out_size, 1, -1])
+    # Predict kappa
+    W_fcK = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcK = bias_variable([1])
+    h_fcK = conv2d(h_convf, W_fcK) + b_fcK
+    #h_fcK = tf.log(1+tf.exp(h_fcK))
+    predK = tf.reshape(h_fcK, [out_size, out_size, 1, -1])
+
+    #Inject the gradients
+    grad_predE = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predA = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predB = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predK = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    l2loss = tf.add_n(tf.get_collection('losses'), name='l2_loss')
+    grad_l2loss = tf.placeholder(tf.float32, shape=[])
+    tvars = tf.trainable_variables()
+    grads = tf.gradients([predE,predA,predB,predK,l2loss], tvars, grad_ys = [grad_predE,grad_predA,grad_predB,grad_predK,grad_l2loss])
+
+    return tvars,grads,predE, predA, predB, predK, l2loss, grad_predE, grad_predA, grad_predB, grad_predK, grad_l2loss, x,y_
+
+def CNN_B_alpha(im_size,out_size,L,batch_size=1,layers = 5, wd=0.001, numfilt=None, E_blur=2,stack_from=2):
+
+    if numfilt is None:
+        numfilt = np.ones(layers,dtype=np.int32)*32
+    #Input and output
+    x = tf.placeholder(tf.float32, shape=[im_size, im_size, 3, batch_size])
+    x_image = tf.reshape(x, [-1, im_size, im_size, 3])
+    y_ = tf.placeholder(tf.float32, shape=[L,2])
+
+    W_conv = []
+    b_conv = []
+    h_conv = []
+    h_pool = []
+    resized_out = []
+    W_conv.append(weight_variable([7, 7, 3, numfilt[0]], wd=wd))
+    b_conv.append(bias_variable([numfilt[0]]))
+    h_conv.append(tf.nn.relu(conv2d(x_image, W_conv[-1],padding='SAME') + b_conv[-1]))
+    h_pool.append(batch_norm(max_pool_2x2(h_conv[-1])))
+
+    for layer in range(1,layers):
+        if layer == 1:
+            W_conv.append(weight_variable([5, 5, numfilt[layer-1], numfilt[layer]],wd=wd))
+        else:
+            W_conv.append(weight_variable([3, 3, numfilt[layer-1], numfilt[layer]], wd=wd))
+        b_conv.append(bias_variable([numfilt[layer]]))
+        h_conv.append(tf.nn.relu(conv2d(h_pool[-1], W_conv[-1],padding='SAME') + b_conv[-1]))
+        h_pool.append(batch_norm(max_pool_2x2(h_conv[-1])))
+        if layer >= stack_from:
+            resized_out.append(tf.image.resize_images(h_conv[-1], [out_size, out_size]))
+
+    h_concat = tf.concat(resized_out,3)
+
+    # MLP for dimension reduction
+    W_convd = weight_variable([1, 1, int(h_concat.shape[3]), 256], wd=wd)
+    b_convd = bias_variable([256])
+    h_convd = batch_norm(tf.nn.relu(conv2d(h_concat, W_convd) + b_convd))
+
+    # MLP for dimension reduction
+    W_convf = weight_variable([1, 1, 256, 64],wd=wd)
+    b_convf = bias_variable([64])
+    h_convf = batch_norm(tf.nn.relu(conv2d(h_convd, W_convf) + b_convf))
+
+    #Predict energy
+    W_fcE = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcE = bias_variable([1])
+    h_fcE = conv2d(h_convf, W_fcE) + b_fcE
+    G_filt = gaussian_filter((9,9), E_blur)
+    predE = tf.reshape(conv2d(h_fcE,G_filt), [out_size, out_size, 1, -1])
+
+    # Predict alpha
+    W_fcA = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcA = bias_variable([1])
+    h_fcA = conv2d(h_convf, W_fcA) + b_fcA
+    #h_fcA = tf.reduce_mean(h_fcA) + h_fcA * 0
+    # predA = tf.nn.softplus(tf.reshape(h_fcA,[im_size,im_size,1,-1]))
+    predA = tf.reshape(h_fcA, [out_size, out_size, 1, -1])
+    # Predict beta
+    W_fcB = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcB = bias_variable([1])
+    h_fcB = conv2d(h_convf, W_fcB) + b_fcB
+    #h_fcB = tf.log(1+tf.exp(h_fcB))
+    predB = tf.reshape(h_fcB, [out_size, out_size, 1, -1])
+    # Predict kappa
+    W_fcK = weight_variable([1, 1, 64, 1],wd=wd)
+    b_fcK = bias_variable([1])
+    h_fcK = conv2d(h_convf, W_fcK) + b_fcK
+    #h_fcK = tf.log(1+tf.exp(h_fcK))
+    predK = tf.reshape(h_fcK, [out_size, out_size, 1, -1])
+
+    #Inject the gradients
+    grad_predE = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predA = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predB = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    grad_predK = tf.placeholder(tf.float32, shape=[out_size, out_size, 1, batch_size])
+    l2loss = tf.add_n(tf.get_collection('losses'), name='l2_loss')
+    grad_l2loss = tf.placeholder(tf.float32, shape=[])
+    tvars = tf.trainable_variables()
+    grads = tf.gradients([predE,predA,predB,predK,l2loss], tvars, grad_ys = [grad_predE,grad_predA,grad_predB,grad_predK,grad_l2loss])
+
+    return tvars,grads,predE, predA, predB, predK, l2loss, grad_predE, grad_predA, grad_predB, grad_predK, grad_l2loss, x,y_
+
+def CNN_B_scalar(im_size,out_size,L,batch_size=1,layers = 5, wd=0.001, numfilt=None, E_blur=2,stack_from=2):
 
     if numfilt is None:
         numfilt = np.ones(layers,dtype=np.int32)*32
@@ -358,12 +596,14 @@ def CNN_B(im_size,out_size,L,batch_size=1,layers = 5, wd=0.001, numfilt=None, E_
     W_fcB = weight_variable([1, 1, 64, 1],wd=wd)
     b_fcB = bias_variable([1])
     h_fcB = conv2d(h_convf, W_fcB) + b_fcB
+    h_fcB = tf.reduce_mean(h_fcB) + h_fcB * 0
     #h_fcB = tf.log(1+tf.exp(h_fcB))
     predB = tf.reshape(h_fcB, [out_size, out_size, 1, -1])
     # Predict kappa
     W_fcK = weight_variable([1, 1, 64, 1],wd=wd)
     b_fcK = bias_variable([1])
     h_fcK = conv2d(h_convf, W_fcK) + b_fcK
+    h_fcK = tf.reduce_mean(h_fcK) + h_fcK * 0
     #h_fcK = tf.log(1+tf.exp(h_fcK))
     predK = tf.reshape(h_fcK, [out_size, out_size, 1, -1])
 
@@ -378,7 +618,6 @@ def CNN_B(im_size,out_size,L,batch_size=1,layers = 5, wd=0.001, numfilt=None, E_
     grads = tf.gradients([predE,predA,predB,predK,l2loss], tvars, grad_ys = [grad_predE,grad_predA,grad_predB,grad_predK,grad_l2loss])
 
     return tvars,grads,predE, predA, predB, predK, l2loss, grad_predE, grad_predA, grad_predB, grad_predK, grad_l2loss, x,y_
-
 
 def snake_graph(out_size,L,niter=100):
     tf_alpha = tf.placeholder(tf.float32, shape=[out_size, out_size])
